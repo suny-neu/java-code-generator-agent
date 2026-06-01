@@ -227,6 +227,15 @@ app.post('/api/download', async (req, res) => {
   }
 });
 
+app.get('/api/files', (req, res) => {
+  const { sessionId } = req.query;
+  const session = sessions.get(sessionId);
+  if (!session || !session.generatedFiles || session.generatedFiles.length === 0) {
+    return res.status(404).json({ error: '没有可用的文件，请先生成代码' });
+  }
+  res.json({ files: session.generatedFiles });
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('Java 代码生成 Agent 已启动: http://localhost:' + PORT);
