@@ -15,6 +15,7 @@ const client = new OpenAI({
   baseURL: 'https://open.bigmodel.cn/api/paas/v4/',
 });
 const MODEL = process.env.ZHIPU_MODEL || 'glm-4-flash';
+console.log('使用模型:', MODEL, '| API Key前8位:', (process.env.ZHIPU_API_KEY || '').slice(0, 8));
 
 const sessions = new Map();
 
@@ -58,12 +59,14 @@ app.post('/api/chat', async (req, res) => {
   req.on('close', () => { aborted = true; });
 
   try {
+    console.log('发起请求, model:', MODEL, 'messages:', session.messages.length);
     const stream = await client.chat.completions.create({
       model: MODEL,
       max_tokens: 8192,
       messages: [{ role: 'system', content: systemPrompt }, ...session.messages],
       stream: true,
     });
+    console.log('stream 创建成功');
 
     let fullResponse = '';
 
