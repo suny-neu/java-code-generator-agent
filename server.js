@@ -100,7 +100,7 @@ app.post('/api/chat', async (req, res) => {
     });
 
     req.on('close', () => {
-      try { stream.abort(); } catch (e) {}
+      try { stream.controller?.abort(); } catch (e) {}
     });
   } catch (err) {
     console.error('API error:', err);
