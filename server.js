@@ -126,7 +126,7 @@ require('dotenv').config();
     for (const t of keyTemplates) {
       const content = loadTemplateContent(t);
       if (content) {
-        systemPrompt += `### ${t}\n\`\`\`\n${content}\n\`\`\`\n\n`;
+        systemPrompt += '### ' + t + '\n```\n' + content + '\n```\n\n';
       }
     }
 
