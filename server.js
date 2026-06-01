@@ -69,6 +69,7 @@ app.post('/api/chat', async (req, res) => {
 
     for await (const chunk of stream) {
       if (aborted) break;
+      console.log('chunk:', JSON.stringify(chunk));
       const text = chunk.choices[0]?.delta?.content || '';
       if (text) {
         fullResponse += text;
