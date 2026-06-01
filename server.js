@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { OpenAI } = require('openai');
+const https = require('https');
 const path = require('path');
 const { buildBaseSystemPrompt, buildEnhancedSystemPrompt, loadTemplateContent } = require('./lib/skill-loader');
 const { parseFiles, detectStep } = require('./lib/code-parser');
@@ -10,12 +10,73 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const client = new OpenAI({
-  apiKey: process.env.ZHIPU_API_KEY,
-  baseURL: 'https://open.bigmodel.cn/api/paas/v4/',
-});
+const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY || '';
 const MODEL = process.env.ZHIPU_MODEL || 'glm-4-flash';
-console.log('使用模型:', MODEL, '| API Key前8位:', (process.env.ZHIPU_API_KEY || '').slice(0, 8));
+console.log('使用模型:', MODEL, '| API Key前8位:', ZHIPU_API_KEY.slice(0, 8));
+
+function zhipuStream(messages, systemPrompt, maxTokens, onText, onDone, onError) {
+  const body = JSON.stringify({
+    model: MODEL,
+    max_tokens: maxTokens,
+    stream: true,
+    messages: [{ role: 'system', content: systemPrompt }, ...messages],
+  });
+
+  const options = {
+    hostname: 'open.bigmodel.cn',
+    path: '/api/paas/v4/chat/completions',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + ZHIPU_API_KEY,
+      'Content-Length': Buffer.byteLength(body),
+    },
+  };
+
+  const req = https.request(options, (res) => {
+    console.log('智谱 API 状态码:', res.statusCode);
+    let buffer = '';
+
+    res.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') { onDone(); return; }
+        try {
+          const json = JSON.parse(data);
+          const text = json.choices?.[0]?.delta?.content || '';
+          if (text) onText(text);
+        } catch (e) {
+          console.error('parse error:', e.message, 'data:', data);
+        }
+      }
+    });
+
+    res.on('end', () => {
+      if (buffer.startsWith('data: ')) {
+        const data = buffer.slice(6).trim();
+        if (data !== '[DONE]') {
+          try {
+            const json = JSON.parse(data);
+            const text = json.choices?.[0]?.delta?.content || '';
+            if (text) onText(text);
+          } catch (e) {}
+        }
+      }
+      onDone();
+    });
+
+    res.on('error', onError);
+  });
+
+  req.on('error', onError);
+  req.write(body);
+  req.end();
+}
 
 const sessions = new Map();
 
@@ -30,7 +91,7 @@ function getSession(id) {
   return sessions.get(id);
 }
 
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', (req, res) => {
   const { message, sessionId } = req.body;
   if (!message || !sessionId) {
     return res.status(400).json({ error: '缺少 message 或 sessionId' });
@@ -40,9 +101,7 @@ app.post('/api/chat', async (req, res) => {
   session.messages.push({ role: 'user', content: message });
 
   const detectedStep = detectStep(message);
-  if (detectedStep) {
-    session.currentStep = detectedStep;
-  }
+  if (detectedStep) session.currentStep = detectedStep;
 
   let systemPrompt;
   if (session.currentStep && session.currentStep !== 'step1') {
@@ -55,62 +114,45 @@ app.post('/api/chat', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
-  let aborted = false;
-  req.on('close', () => { aborted = true; });
+  let fullResponse = '';
 
-  try {
-    console.log('发起请求, model:', MODEL, 'messages:', session.messages.length);
-    const stream = await client.chat.completions.create({
-      model: MODEL,
-      max_tokens: 8192,
-      messages: [{ role: 'system', content: systemPrompt }, ...session.messages],
-      stream: true,
-    });
-    console.log('stream 创建成功');
-
-    let fullResponse = '';
-
-    for await (const chunk of stream) {
-      if (aborted) break;
-      console.log('chunk:', JSON.stringify(chunk));
-      const text = chunk.choices[0]?.delta?.content || '';
-      if (text) {
-        fullResponse += text;
-        res.write(`data: ${JSON.stringify({ type: 'text', content: text })}\n\n`);
+  zhipuStream(
+    session.messages,
+    systemPrompt,
+    8192,
+    (text) => {
+      fullResponse += text;
+      res.write('data: ' + JSON.stringify({ type: 'text', content: text }) + '\n\n');
+    },
+    () => {
+      session.messages.push({ role: 'assistant', content: fullResponse });
+      const replyStep = detectStep(fullResponse);
+      if (replyStep) session.currentStep = replyStep;
+      const files = parseFiles(fullResponse);
+      if (files.length > 0) {
+        res.write('data: ' + JSON.stringify({ type: 'files', count: files.length }) + '\n\n');
       }
+      res.write('data: ' + JSON.stringify({ type: 'done' }) + '\n\n');
+      res.end();
+    },
+    (err) => {
+      console.error('API error:', err);
+      res.write('data: ' + JSON.stringify({ type: 'error', content: err.message }) + '\n\n');
+      res.end();
     }
+  );
 
-    session.messages.push({ role: 'assistant', content: fullResponse });
-
-    const replyStep = detectStep(fullResponse);
-    if (replyStep) {
-      session.currentStep = replyStep;
-    }
-
-    const files = parseFiles(fullResponse);
-    if (files.length > 0) {
-      res.write(`data: ${JSON.stringify({ type: 'files', count: files.length })}\n\n`);
-    }
-
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-    res.end();
-  } catch (err) {
-    console.error('API error:', err);
-    res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
-    res.end();
-  }
+  req.on('close', () => {});
 });
 
-app.post('/api/generate', async (req, res) => {
+app.post('/api/generate', (req, res) => {
   const { sessionId, projectName } = req.body;
   if (!sessionId) {
     return res.status(400).json({ error: '缺少 sessionId' });
   }
 
   const session = getSession(sessionId);
-  if (projectName) {
-    session.projectName = projectName;
-  }
+  if (projectName) session.projectName = projectName;
 
   let systemPrompt = buildEnhancedSystemPrompt('step5');
 
@@ -136,40 +178,33 @@ app.post('/api/generate', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
 
   const messages = [...session.messages, { role: 'user', content: generateMessage }];
+  let fullResponse = '';
 
-  try {
-    const stream = await client.chat.completions.create({
-      model: MODEL,
-      max_tokens: 16384,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      stream: true,
-    });
-
-    let fullResponse = '';
-
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content || '';
-      if (text) {
-        fullResponse += text;
-        res.write(`data: ${JSON.stringify({ type: 'text', content: text })}\n\n`);
+  zhipuStream(
+    messages,
+    systemPrompt,
+    16384,
+    (text) => {
+      fullResponse += text;
+      res.write('data: ' + JSON.stringify({ type: 'text', content: text }) + '\n\n');
+    },
+    () => {
+      session.messages.push({ role: 'user', content: generateMessage });
+      session.messages.push({ role: 'assistant', content: fullResponse });
+      const files = parseFiles(fullResponse);
+      if (files.length > 0) {
+        session.generatedFiles = files;
+        res.write('data: ' + JSON.stringify({ type: 'files', count: files.length }) + '\n\n');
       }
+      res.write('data: ' + JSON.stringify({ type: 'done' }) + '\n\n');
+      res.end();
+    },
+    (err) => {
+      console.error('Generate error:', err);
+      res.write('data: ' + JSON.stringify({ type: 'error', content: err.message }) + '\n\n');
+      res.end();
     }
-
-    session.messages.push({ role: 'user', content: generateMessage });
-    session.messages.push({ role: 'assistant', content: fullResponse });
-
-    const files = parseFiles(fullResponse);
-    if (files.length > 0) {
-      session.generatedFiles = files;
-      res.write(`data: ${JSON.stringify({ type: 'files', count: files.length })}\n\n`);
-    }
-    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
-    res.end();
-  } catch (err) {
-    console.error('Generate error:', err);
-    res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
-    res.end();
-  }
+  );
 });
 
 app.post('/api/download', async (req, res) => {
@@ -183,7 +218,6 @@ app.post('/api/download', async (req, res) => {
   try {
     const zipBuffer = await generateZip(session.generatedFiles, session.projectName);
     const filename = session.projectName + '.zip';
-
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="' + filename + '"');
     res.send(zipBuffer);
