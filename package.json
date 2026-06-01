@@ -1,16 +1,16 @@
-{
-  "name": "java-code-generator-agent",
-  "version": "1.0.0",
-  "description": "Java代码生成Web Agent - 基于SOP的工业级代码生成",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
-    "archiver": "^7.0.1",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.0"
+ {
+    "name": "java-code-generator-agent",
+    "version": "1.0.0",
+    "description": "Java代码生成Web Agent - 基于SOP的工业级代码生成",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js",
+      "dev": "node --watch server.js"
+    },
+    "dependencies": {
+      "openai": "^4.0.0",
+      "archiver": "^7.0.1",
+      "dotenv": "^16.4.5",
+      "express": "^4.21.0"
+    }
   }
-}
